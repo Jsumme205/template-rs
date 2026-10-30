@@ -1,6 +1,6 @@
 use core::{fmt::Display, sync::atomic::AtomicUsize};
 
-use alloc::{boxed::Box, string::String};
+use alloc::string::String;
 
 pub(crate) mod metadata;
 pub(crate) mod set;
@@ -12,11 +12,11 @@ use crate::{
     component::{
         cell::ComponentSetCell,
         metadata::{ComponentMetadata, HasComponentMetadata, MetadataBuilder},
-        set::{ComponentRange, ComponentRangeBuilder, ComponentSet, DynComponent},
+        set::{ComponentRange, ComponentRangeBuilder, ComponentSet, IntoDynComponent},
     },
     error::Error,
     renderable::Renderable,
-    utils::{BorrowCount, Boxed, MaybeArc, MaybeBoxed},
+    utils::{BorrowCount, MaybeArc, MaybeBoxed},
     writer::Writer,
 };
 
@@ -77,107 +77,147 @@ pub trait Component {
     fn render(&self, ctx: &mut WriteContext<'_, '_>) -> Result<(), Error>;
 }
 
-pub struct Div<'set, 'meta, Contents: ?Sized = dyn Display> {
-    set: ComponentRange<'set>,
-    contents: Option<MaybeBoxed<'set, Contents>>,
-    metadata: ComponentMetadata<'meta>,
+pub struct ComponentBuilder<'asset, 'set, C: ?Sized = dyn Display, B = AtomicUsize> {
+    component_metadata: MetadataBuilder<'asset, 'set, B>,
+    component_range: ComponentRangeBuilder<'asset, 'set, B>,
+    contents: Option<MaybeBoxed<'asset, C>>,
 }
 
-impl<'set, 'meta, Contents: ?Sized> HasComponentMetadata<'meta> for Div<'set, 'meta, Contents> {
-    fn metadata(&self) -> &ComponentMetadata<'meta> {
-        &self.metadata
+impl<'asset, 'set, B> ComponentBuilder<'asset, 'set, dyn Display, B>
+where
+    B: BorrowCount,
+{
+    pub fn new(
+        component_set: &'set ComponentSetCell<'asset, B>,
+        interner: &'set ClassInternerCell<B>,
+    ) -> Self {
+        Self {
+            component_metadata: ComponentMetadata::builder(interner),
+            component_range: ComponentRange::builder(component_set),
+            contents: None,
+        }
+    }
+
+    pub fn with_contents<C>(
+        self,
+        contents: impl Into<MaybeBoxed<'asset, C>>,
+    ) -> ComponentBuilder<'asset, 'set, C, B>
+    where
+        C: ?Sized,
+    {
+        ComponentBuilder {
+            component_metadata: self.component_metadata,
+            component_range: self.component_range,
+            contents: Some(contents.into()),
+        }
     }
 }
 
-impl<'set, 'meta, Contents: ?Sized> Tag for Div<'set, 'meta, Contents> {
+impl<'asset, 'set, C, B> ComponentBuilder<'asset, 'set, C, B>
+where
+    C: ?Sized,
+    B: BorrowCount,
+{
+    pub fn finish<Component>(&mut self) -> Component
+    where
+        Component: FromComponentBuilder<'asset, C>,
+    {
+        Component::from_component_parts(
+            self.component_metadata.finish(),
+            self.component_range.finish(),
+            self.contents.take(),
+        )
+    }
+
+    pub fn child<Child, M>(&mut self, child: Child) -> &mut Self
+    where
+        Child: IntoDynComponent<'asset, M>,
+    {
+        let component = child.into_dyn_component();
+        self.component_range.register(component);
+        self
+    }
+
+    pub fn id(&mut self, id: impl Into<MaybeArc<'asset, str>>) -> &mut Self {
+        self.component_metadata.id(id);
+        self
+    }
+
+    pub fn class(&mut self, class: impl AsRef<str>) -> &mut Self {
+        self.component_metadata.class(class);
+        self
+    }
+}
+
+pub trait FromComponentBuilder<'asset, C: ?Sized> {
+    fn from_component_parts(
+        component_metadata: ComponentMetadata<'asset>,
+        component_range: ComponentRange<'asset>,
+        contents: Option<MaybeBoxed<'asset, C>>,
+    ) -> Self;
+}
+
+pub fn builder<'asset, 'set, B>(
+    component_set: &'set ComponentSetCell<'asset, B>,
+    interner: &'set ClassInternerCell<B>,
+) -> ComponentBuilder<'asset, 'set, dyn Display, B>
+where
+    B: BorrowCount,
+{
+    ComponentBuilder::new(component_set, interner)
+}
+
+pub struct Div<'asset, C: ?Sized = dyn Display> {
+    meta: ComponentMetadata<'asset>,
+    range: ComponentRange<'asset>,
+    contents: Option<MaybeBoxed<'asset, C>>,
+}
+
+impl<'asset, C> FromComponentBuilder<'asset, C> for Div<'asset, C>
+where
+    C: ?Sized,
+{
+    fn from_component_parts(
+        component_metadata: ComponentMetadata<'asset>,
+        component_range: ComponentRange<'asset>,
+        contents: Option<MaybeBoxed<'asset, C>>,
+    ) -> Self {
+        Self {
+            meta: component_metadata,
+            range: component_range,
+            contents,
+        }
+    }
+}
+
+impl<'asset, C> Tag for Div<'asset, C>
+where
+    C: ?Sized,
+{
     const TAG: &'static str = "div";
 }
 
-impl<'set, 'meta, Contents: ?Sized> Component for Div<'meta, 'set, Contents>
+impl<'asset, C> HasComponentMetadata<'asset> for Div<'asset, C>
 where
-    Contents: Renderable,
+    C: ?Sized,
+{
+    fn metadata(&self) -> &ComponentMetadata<'asset> {
+        &self.meta
+    }
+}
+
+impl<'asset, C> Component for Div<'asset, C>
+where
+    C: ?Sized + Renderable,
 {
     fn render(&self, ctx: &mut WriteContext<'_, '_>) -> Result<(), Error> {
         ctx.in_scope(self, |ctx| {
             if let Some(contents) = &self.contents {
                 contents.render(ctx.writer)?;
             }
-            self.set.render_components(ctx)?;
+
+            self.range.render_components(ctx)?;
             Ok(())
         })
     }
-}
-
-pub struct DivBuilder<'range, 'set, 'meta, C: ?Sized = dyn Display, B = AtomicUsize> {
-    range_builder: ComponentRangeBuilder<'range, 'set, B>,
-    contents: Option<MaybeBoxed<'range, C>>,
-    metadata: MetadataBuilder<'meta, 'set, B>,
-}
-
-impl<'range, 'meta> Div<'range, 'meta> {
-    pub fn builder<'set, B: BorrowCount>(
-        component_set: &'set ComponentSetCell<'range, B>,
-        interner: &'set ClassInternerCell<B>,
-    ) -> DivBuilder<'range, 'set, 'meta, dyn Display, B> {
-        DivBuilder {
-            range_builder: ComponentRange::builder(component_set),
-            contents: None,
-            metadata: ComponentMetadata::builder(interner),
-        }
-    }
-}
-
-impl<'range, 'set, 'meta> DivBuilder<'range, 'set, 'meta> {
-    pub fn contents<C>(
-        self,
-        contents: impl Into<MaybeBoxed<'range, C>>,
-    ) -> DivBuilder<'range, 'set, 'meta, C>
-    where
-        C: ?Sized,
-    {
-        DivBuilder {
-            contents: Some(contents.into()),
-            metadata: self.metadata,
-            range_builder: self.range_builder,
-        }
-    }
-}
-
-impl<'range, 'set, 'meta, Cnt: ?Sized> DivBuilder<'range, 'set, 'meta, Cnt> {
-    pub fn child<C>(&mut self, child: C) -> &mut Self
-    where
-        C: Into<DynComponent<'range>>,
-    {
-        let child = child.into();
-
-        self.range_builder.register(child);
-        self
-    }
-
-    pub fn id(&mut self, id: impl Into<MaybeArc<'meta, str>>) -> &mut Self {
-        self.metadata.id(id);
-        self
-    }
-
-    pub fn class(&mut self, class: impl AsRef<str>) -> &mut Self {
-        self.metadata.class(class);
-        self
-    }
-
-    pub fn finish(&mut self) -> Div<'range, 'meta, Cnt> {
-        Div {
-            set: self.range_builder.finish(),
-            contents: self.contents.take(),
-            metadata: self.metadata.finish(),
-        }
-    }
-}
-
-fn _f() {
-    let component_set = ComponentSetCell::new();
-    let interner = ClassInternerCell::new();
-
-    Div::builder(&component_set, &interner)
-        .child(Div::builder(&component_set, &interner).finish().boxed())
-        .finish();
 }

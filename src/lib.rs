@@ -11,4 +11,5 @@ pub mod renderable;
 pub mod utils;
 pub mod writer;
 
+pub mod head;
 pub mod renderer;

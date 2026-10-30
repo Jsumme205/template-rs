@@ -1,4 +1,5 @@
 use core::any::TypeId;
+use core::hash::Hash;
 use core::marker::PhantomData;
 use core::mem;
 use core::ops::Deref;
@@ -70,6 +71,26 @@ impl ConstTyId {
     }
 }
 
+impl PartialEq for ConstTyId {
+    fn eq(&self, other: &Self) -> bool {
+        self.get() == other.get()
+    }
+}
+
+impl Eq for ConstTyId {}
+
+impl Hash for ConstTyId {
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.get().hash(state);
+    }
+}
+
+impl PartialEq<TypeId> for ConstTyId {
+    fn eq(&self, other: &TypeId) -> bool {
+        self.get() == *other
+    }
+}
+
 fn of<T>() -> TypeId
 where
     T: ?Sized,
@@ -137,3 +158,6 @@ impl<T> Boxed for T {
         self.into()
     }
 }
+
+pub(crate) const EXPECT_ALREADY_BORROWED_MESSAGE: &str =
+    "PANIC: already borrowed mutably. There is a bug somewhere in the code";

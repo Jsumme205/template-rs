@@ -98,21 +98,41 @@ impl<'a> DynComponent<'a> {
     }
 }
 
-impl<'a, C> From<&'a C> for DynComponent<'a>
+pub trait FromComponent<C, M>: Sized {
+    fn from_component(component: C) -> Self;
+}
+
+impl<'a, C, M> FromComponent<C, M> for DynComponent<'a>
 where
-    C: Component + 'a,
+    C: IntoDynComponent<'a, M>,
 {
-    fn from(value: &'a C) -> Self {
-        Self::from_ref(value)
+    fn from_component(component: C) -> Self {
+        component.into_dyn_component()
     }
 }
 
-impl<'a, C> From<Box<C>> for DynComponent<'a>
+pub trait IntoDynComponent<'c, M> {
+    fn into_dyn_component(self) -> DynComponent<'c>;
+}
+
+pub struct Ref;
+pub struct Val;
+
+impl<'component, C> IntoDynComponent<'component, Ref> for &'component C
 where
-    C: Component + 'a,
+    C: Component,
 {
-    fn from(value: Box<C>) -> Self {
-        Self::from_boxed(value)
+    fn into_dyn_component(self) -> DynComponent<'component> {
+        DynComponent::from_ref(self)
+    }
+}
+
+impl<'c, C> IntoDynComponent<'c, Val> for C
+where
+    C: Component + 'c,
+{
+    fn into_dyn_component(self) -> DynComponent<'c> {
+        DynComponent::from_owned(self)
     }
 }
 
@@ -150,12 +170,9 @@ impl<'a> ComponentSet<'a> {
         Self { inner: Vec::new() }
     }
 
-    pub fn register<C>(&mut self, component: C, range: &mut ComponentRange<'a>)
-    where
-        C: Into<DynComponent<'a>>,
-    {
+    pub fn register(&mut self, component: DynComponent<'a>, range: &mut ComponentRange<'a>) {
         let index = self.inner.len();
-        self.inner.push(component.into());
+        self.inner.push(component);
         match &mut range.repr {
             ComponentRangeRepr::IndicesSet { set } => set.push(index),
             ComponentRangeRepr::SingleRange { range: r } => {
@@ -269,11 +286,8 @@ impl<'range, 'set, B> ComponentRangeBuilder<'range, 'set, B>
 where
     B: BorrowCount,
 {
-    pub(crate) fn register<C>(&mut self, component: C) -> &mut Self
-    where
-        C: Into<DynComponent<'range>>,
-    {
-        let component = component.into();
+    pub(crate) fn register(&mut self, component: DynComponent<'range>) -> &mut Self {
+        let component = component;
         self.component_set
             .try_write()
             .expect("exclusive borrow failed")

@@ -1,36 +1,29 @@
-use crate::{class_interner::ClassInterner, component::set::ComponentSet};
+use core::sync::atomic::AtomicUsize;
 
-pub struct Renderer<'a, APP, W> {
-    component_set: ComponentSet<'a>,
-    class_interner: ClassInterner,
-    main_component: APP,
-    writer: W,
+use crate::{
+    asset::set::AssetSet, class_interner::cell::ClassInternerCell,
+    component::cell::ComponentSetCell, error::Error, head::Head, writer::Writer,
+};
+
+pub struct Config {}
+
+pub struct Renderer<'asset, 'set, APP, B = AtomicUsize> {
+    // registration set stuff
+    asset_set: &'set AssetSet<'asset>,
+    component_set: &'set ComponentSetCell<'asset, B>,
+    interner: &'set ClassInternerCell<B>,
+
+    config: Config,
+
+    head: Head<'asset>,
+    root: APP,
 }
 
-pub struct RendererBuilder<'a, W = ()> {
-    component_set: ComponentSet<'a>,
-    class_interner: ClassInterner,
-    writer: W,
-}
-
-impl<'a> Renderer<'a, (), ()> {
-    pub fn builder() -> RendererBuilder<'a> {
-        RendererBuilder {
-            component_set: ComponentSet::new(),
-            class_interner: ClassInterner::new(),
-            writer: (),
-        }
+impl<'asset, 'set, B> Renderer<'asset, 'set, B> {
+    pub fn render<W>(&mut self, writer: &mut W) -> Result<(), Error>
+    where
+        W: Writer + ?Sized,
+    {
+        Ok(())
     }
 }
-
-impl<'a> RendererBuilder<'a> {
-    pub fn with_writer<W>(self, writer: W) -> RendererBuilder<'a, W> {
-        RendererBuilder {
-            component_set: self.component_set,
-            class_interner: self.class_interner,
-            writer,
-        }
-    }
-}
-
-impl<'a, W> RendererBuilder<'a, W> {}
