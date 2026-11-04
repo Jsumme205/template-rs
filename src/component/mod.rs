@@ -8,11 +8,10 @@ pub(crate) mod set;
 pub mod cell;
 
 use crate::{
-    class_interner::{ClassInterner, cell::ClassInternerCell},
+    class_interner::ClassInterner,
     component::{
-        cell::ComponentSetCell,
-        metadata::{ComponentMetadata, HasComponentMetadata, MetadataBuilder},
-        set::{ComponentRange, ComponentRangeBuilder, ComponentSet, IntoDynComponent},
+        metadata::{ComponentMetadata, HasComponentMetadata},
+        set::{ComponentRange, ComponentSet},
     },
     error::Error,
     renderable::Renderable,
@@ -21,7 +20,7 @@ use crate::{
 };
 
 pub struct WriteContext<'a, 'r> {
-    writer: &'a mut (dyn Writer + 'a),
+    pub(crate) writer: &'a mut (dyn Writer + 'a),
     pub(crate) component_set: &'a ComponentSet<'r>,
     pub(crate) interner: &'a ClassInterner,
 }
@@ -32,7 +31,29 @@ impl<'a, 'r> WriteContext<'a, 'r> {
         F: FnOnce(&mut WriteContext<'_, 'r>) -> Result<(), Error>,
         T: HasComponentMetadata<'meta> + Tag,
     {
-        let mut s = String::new();
+        self.in_temporary_buffer(None, |tmp_buffer| {
+            tmp_buffer.write_beginning_tag(T::TAG, component.metadata())?;
+
+            if let Err(err) = write(tmp_buffer) {
+                return Err(err);
+            } else {
+                if T::HAS_END_TAG {
+                    tmp_buffer.write_end_tag(T::TAG)?;
+                }
+                Ok(())
+            }
+        })
+    }
+
+    pub fn in_temporary_buffer<F>(
+        &mut self,
+        size_hint: impl Into<Option<usize>>,
+        write: F,
+    ) -> Result<(), Error>
+    where
+        F: FnOnce(&mut WriteContext<'_, 'r>) -> Result<(), Error>,
+    {
+        let mut s = String::with_capacity(size_hint.into().unwrap_or(0));
 
         let mut tmp_buffer = WriteContext {
             writer: &mut s,
@@ -40,12 +61,33 @@ impl<'a, 'r> WriteContext<'a, 'r> {
             interner: self.interner,
         };
 
-        tmp_buffer.write_beginning_tag(T::TAG, component.metadata())?;
-
-        if let Err(err) = write(&mut tmp_buffer) {
-            return Err(err);
+        if let Err(e) = write(&mut tmp_buffer) {
+            return Err(e);
         } else {
             self.writer.pull(&mut s)?;
+            Ok(())
+        }
+    }
+
+    pub fn in_tag<T, F>(&mut self, write: F) -> Result<(), Error>
+    where
+        F: FnOnce(&mut WriteContext<'_, 'r>) -> Result<(), Error>,
+        T: Tag,
+    {
+        let mut buf = String::new();
+
+        let mut ctx = WriteContext {
+            writer: &mut buf,
+            component_set: self.component_set,
+            interner: self.interner,
+        };
+
+        ctx.write_beginning_tag(T::TAG, &ComponentMetadata::empty())?;
+
+        if let Err(e) = write(&mut ctx) {
+            return Err(e);
+        } else {
+            self.writer.pull(&mut buf)?;
             if T::HAS_END_TAG {
                 self.write_end_tag(T::TAG)?;
             }
@@ -77,117 +119,10 @@ pub trait Component {
     fn render(&self, ctx: &mut WriteContext<'_, '_>) -> Result<(), Error>;
 }
 
-pub struct ComponentBuilder<'asset, 'set, C: ?Sized = dyn Display, B = AtomicUsize> {
-    component_metadata: MetadataBuilder<'asset, 'set, B>,
-    component_range: ComponentRangeBuilder<'asset, 'set, B>,
-    contents: Option<MaybeBoxed<'asset, C>>,
-}
-
-impl<'asset, 'set, B> ComponentBuilder<'asset, 'set, dyn Display, B>
-where
-    B: BorrowCount,
-{
-    pub fn new(
-        component_set: &'set ComponentSetCell<'asset, B>,
-        interner: &'set ClassInternerCell<B>,
-    ) -> Self {
-        Self {
-            component_metadata: ComponentMetadata::builder(interner),
-            component_range: ComponentRange::builder(component_set),
-            contents: None,
-        }
-    }
-
-    pub fn with_contents<C>(
-        self,
-        contents: impl Into<MaybeBoxed<'asset, C>>,
-    ) -> ComponentBuilder<'asset, 'set, C, B>
-    where
-        C: ?Sized,
-    {
-        ComponentBuilder {
-            component_metadata: self.component_metadata,
-            component_range: self.component_range,
-            contents: Some(contents.into()),
-        }
-    }
-}
-
-impl<'asset, 'set, C, B> ComponentBuilder<'asset, 'set, C, B>
-where
-    C: ?Sized,
-    B: BorrowCount,
-{
-    pub fn finish<Component>(&mut self) -> Component
-    where
-        Component: FromComponentBuilder<'asset, C>,
-    {
-        Component::from_component_parts(
-            self.component_metadata.finish(),
-            self.component_range.finish(),
-            self.contents.take(),
-        )
-    }
-
-    pub fn child<Child, M>(&mut self, child: Child) -> &mut Self
-    where
-        Child: IntoDynComponent<'asset, M>,
-    {
-        let component = child.into_dyn_component();
-        self.component_range.register(component);
-        self
-    }
-
-    pub fn id(&mut self, id: impl Into<MaybeArc<'asset, str>>) -> &mut Self {
-        self.component_metadata.id(id);
-        self
-    }
-
-    pub fn class(&mut self, class: impl AsRef<str>) -> &mut Self {
-        self.component_metadata.class(class);
-        self
-    }
-}
-
-pub trait FromComponentBuilder<'asset, C: ?Sized> {
-    fn from_component_parts(
-        component_metadata: ComponentMetadata<'asset>,
-        component_range: ComponentRange<'asset>,
-        contents: Option<MaybeBoxed<'asset, C>>,
-    ) -> Self;
-}
-
-pub fn builder<'asset, 'set, B>(
-    component_set: &'set ComponentSetCell<'asset, B>,
-    interner: &'set ClassInternerCell<B>,
-) -> ComponentBuilder<'asset, 'set, dyn Display, B>
-where
-    B: BorrowCount,
-{
-    ComponentBuilder::new(component_set, interner)
-}
-
 pub struct Div<'asset, C: ?Sized = dyn Display> {
     meta: ComponentMetadata<'asset>,
     range: ComponentRange<'asset>,
     contents: Option<MaybeBoxed<'asset, C>>,
-}
-
-impl<'asset, C> FromComponentBuilder<'asset, C> for Div<'asset, C>
-where
-    C: ?Sized,
-{
-    fn from_component_parts(
-        component_metadata: ComponentMetadata<'asset>,
-        component_range: ComponentRange<'asset>,
-        contents: Option<MaybeBoxed<'asset, C>>,
-    ) -> Self {
-        Self {
-            meta: component_metadata,
-            range: component_range,
-            contents,
-        }
-    }
 }
 
 impl<'asset, C> Tag for Div<'asset, C>
@@ -218,6 +153,8 @@ where
 
             self.range.render_components(ctx)?;
             Ok(())
-        })
+        })?;
+
+        Ok(())
     }
 }

@@ -22,3 +22,14 @@ where
         (self.0)(&mut writer)
     }
 }
+
+pub fn render_fn<F>(f: F) -> RenderFn<F>
+where
+    F: Fn(&mut dyn Writer) -> Result<(), Error>,
+{
+    fn assert_renderable<T: Renderable>(v: T) -> T {
+        v
+    }
+
+    assert_renderable(RenderFn(f))
+}

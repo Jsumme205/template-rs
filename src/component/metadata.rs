@@ -8,6 +8,15 @@ pub struct ComponentMetadata<'meta> {
     class: Option<Symbol>,
 }
 
+impl ComponentMetadata<'_> {
+    pub(crate) fn empty() -> Self {
+        Self {
+            id: None,
+            class: None,
+        }
+    }
+}
+
 impl<'meta> ComponentMetadata<'meta> {
     pub const fn builder<'interner, B>(
         interner: &'interner ClassInternerCell<B>,
@@ -64,5 +73,11 @@ impl core::fmt::Display for ComponentMetadata<'_> {
         }
 
         Ok(())
+    }
+}
+
+impl ComponentMetadata<'_> {
+    pub fn id(&self) -> Option<&str> {
+        self.id.as_deref()
     }
 }

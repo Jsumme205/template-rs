@@ -171,6 +171,7 @@ impl Pool {
 }
 
 struct Block {
+    #[allow(unused)]
     prev: Option<NonNull<Block>>,
     next: Option<NonNull<Block>>,
     data: [MaybeUninit<u8>; BLOCK_SIZE],

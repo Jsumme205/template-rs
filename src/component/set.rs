@@ -98,20 +98,9 @@ impl<'a> DynComponent<'a> {
     }
 }
 
-pub trait FromComponent<C, M>: Sized {
-    fn from_component(component: C) -> Self;
-}
-
-impl<'a, C, M> FromComponent<C, M> for DynComponent<'a>
-where
-    C: IntoDynComponent<'a, M>,
-{
-    fn from_component(component: C) -> Self {
-        component.into_dyn_component()
-    }
-}
-
 pub trait IntoDynComponent<'c, M> {
+    type Component: Component;
+
     fn into_dyn_component(self) -> DynComponent<'c>;
 }
 
@@ -122,6 +111,8 @@ impl<'component, C> IntoDynComponent<'component, Ref> for &'component C
 where
     C: Component,
 {
+    type Component = C;
+
     fn into_dyn_component(self) -> DynComponent<'component> {
         DynComponent::from_ref(self)
     }
@@ -131,6 +122,7 @@ impl<'c, C> IntoDynComponent<'c, Val> for C
 where
     C: Component + 'c,
 {
+    type Component = C;
     fn into_dyn_component(self) -> DynComponent<'c> {
         DynComponent::from_owned(self)
     }

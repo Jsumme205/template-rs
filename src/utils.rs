@@ -1,9 +1,11 @@
 use core::any::TypeId;
+use core::borrow::Borrow;
 use core::hash::Hash;
 use core::marker::PhantomData;
-use core::mem;
+use core::mem::{self, MaybeUninit};
 use core::ops::Deref;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::{ptr, slice};
 
 use alloc::{boxed::Box, rc::Rc, string::String, sync::Arc};
 
@@ -48,6 +50,36 @@ where
             Self::Owned(o) => o.deref(),
         }
     }
+}
+
+impl<Ptr> Hash for MaybeBorrowed<'_, Ptr>
+where
+    Ptr: Deref,
+    Ptr: Borrow<Ptr::Target>,
+    Ptr::Target: Hash,
+{
+    fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
+        self.deref().hash(state);
+    }
+}
+
+impl<Ptr> PartialEq for MaybeBorrowed<'_, Ptr>
+where
+    Ptr: Deref,
+    Ptr: Borrow<Ptr::Target>,
+    Ptr::Target: PartialEq,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.deref().eq(other.deref())
+    }
+}
+
+impl<Ptr> Eq for MaybeBorrowed<'_, Ptr>
+where
+    Ptr: Deref,
+    Ptr: Borrow<Ptr::Target>,
+    Ptr::Target: Eq,
+{
 }
 
 fn _f() {
@@ -161,3 +193,49 @@ impl<T> Boxed for T {
 
 pub(crate) const EXPECT_ALREADY_BORROWED_MESSAGE: &str =
     "PANIC: already borrowed mutably. There is a bug somewhere in the code";
+
+pub struct PushBuffer<'a, T> {
+    buffer: &'a mut [MaybeUninit<T>],
+    len: usize,
+}
+
+impl<'a, T> PushBuffer<'a, T> {
+    pub const fn new(buffer: &'a mut [MaybeUninit<T>]) -> Self {
+        Self { buffer, len: 0 }
+    }
+
+    pub const fn push(&mut self, val: T) -> Result<(), T> {
+        if self.len == self.buffer.len() {
+            return Err(val);
+        } else {
+            unsafe {
+                self.buffer
+                    .as_mut_ptr()
+                    .add(self.len)
+                    .write(MaybeUninit::new(val));
+                self.len += 1;
+            }
+            Ok(())
+        }
+    }
+
+    pub fn drop_initialized(&mut self) {
+        let old_len = self.len;
+        self.len = 0;
+
+        if old_len == 0 {
+            return;
+        }
+
+        unsafe {
+            ptr::drop_in_place(ptr::slice_from_raw_parts_mut(
+                self.buffer.as_mut_ptr(),
+                old_len,
+            ));
+        }
+    }
+
+    pub const fn into_mut_slice(self) -> &'a mut [T] {
+        unsafe { slice::from_raw_parts_mut(self.buffer.as_mut_ptr().cast(), self.len) }
+    }
+}
