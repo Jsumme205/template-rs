@@ -7,6 +7,7 @@ pub enum ErrorKind {
     IoError,
     FmtError,
     ParseError,
+    NotFound,
     Other,
 }
 
@@ -83,5 +84,14 @@ impl Error {
 
     pub const fn as_statically_known_str(&self) -> Option<&'static str> {
         self.payload.as_statically_known_string()
+    }
+}
+
+impl From<fmt::Error> for Error {
+    fn from(value: fmt::Error) -> Self {
+        Self::new(
+            ErrorKind::FmtError,
+            Box::new(value) as Box<dyn StdError + Send + 'static>,
+        )
     }
 }

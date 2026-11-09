@@ -1,105 +1,47 @@
-use core::sync::atomic::AtomicUsize;
+use core::{fmt::Display, hash};
 
 use alloc::string::String;
 
 use crate::{
-    body::Body,
-    class_interner::cell::ClassInternerCell,
-    component::{Component, WriteContext, cell::ComponentSetCell},
-    error::Error,
-    head::Head,
-    utils::{BorrowCount, MaybeArc},
-    writer::Writer,
+    component::WriteContext, error::Error, module::IntoResult, page::Page, path::Path,
+    utils::MaybeArc, writer::WriterRef,
 };
 
-pub struct Builder<'asset, 'set, B> {
-    component_set: &'set ComponentSetCell<'asset, B>,
-    interner: &'set ClassInternerCell<B>,
-
-    config: Config<'asset>,
+pub struct Builder<'asset, C: ?Sized = dyn Display> {
+    root: Option<Page<'asset, C>>,
 }
 
 pub struct Config<'a> {
-    pub output_dir: MaybeArc<'a, str>,
+    pub(crate) lang: MaybeArc<'a, str>,
 }
 
-pub struct Renderer<'asset, 'set, APP, B = AtomicUsize> {
-    // registration set stuff
-    component_set: &'set ComponentSetCell<'asset, B>,
-    interner: &'set ClassInternerCell<B>,
-
-    config: Config<'asset>,
-
-    head: Head<'asset>,
-    body: Body<'asset>,
-    root: APP,
-}
-
-impl<'asset, 'set, APP, B> Renderer<'asset, 'set, APP, B>
+pub(crate) fn in_html<F, R>(
+    ctx: &mut WriteContext<'_, '_>,
+    cfg: &Config<'_>,
+    f: F,
+) -> Result<(), Error>
 where
-    B: BorrowCount,
-    APP: Component,
+    F: FnOnce(&mut WriteContext<'_, '_>) -> R,
+    R: IntoResult<()>,
 {
-    pub fn render<W>(&mut self, writer: &mut W) -> Result<(), Error>
-    where
-        W: Writer + ?Sized,
-    {
-        write_prefix(writer)?;
+    ctx.writer.write_str("<!DOCTYPE html>\n")?;
+    ctx.writer
+        .write_fmt(format_args!("<html lang=\"{}\">\n", &*cfg.lang))?;
 
-        let mut tmp = String::new();
+    let mut buf = String::new();
 
-        let mut context = WriteContext {
-            writer: &mut tmp,
-            component_set: &*self
-                .component_set
-                .try_read()
-                .expect("this should never fail"),
-            interner: &*self.interner.try_read().expect("this should never fail"),
-        };
+    let mut context = WriteContext {
+        component_set: ctx.component_set,
+        interner: ctx.interner,
+        writer: WriterRef::from_ref(&mut buf),
+    };
 
-        self.head.render(&mut context, |ctx| Ok(()))?;
-
-        self.body
-            .render(&mut context, |ctx| self.root.render(ctx))?;
-
-        write_postfix(writer)?;
-
-        writer.pull(&mut tmp)?;
-
+    // we can just discard the result, as it's just a unit type
+    if let Err(e) = f(&mut context).into_result(&mut None) {
+        ctx.writer.write_str("</html>")?;
+        return Err(e);
+    } else {
+        ctx.writer.pull(&mut buf)?;
         Ok(())
     }
-
-    pub fn bundle<W, IO>(&mut self, writer: &mut W, io: &IO) -> Result<(), Error>
-    where
-        W: Writer + ?Sized,
-        IO: Io + ?Sized,
-        IO::Error: Into<Error>,
-        str: AsRef<IO::Path>,
-    {
-        todo!()
-    }
-}
-
-fn write_prefix<W>(writer: &mut W) -> Result<(), Error>
-where
-    W: ?Sized + Writer,
-{
-    const BEGINNING_TEMPLATE_STRING: &str = "<!DOCTYPE html>\n<html lang=\"en\">\n";
-    writer.write_str(BEGINNING_TEMPLATE_STRING)
-}
-
-fn write_postfix<W>(writer: &mut W) -> Result<(), Error>
-where
-    W: ?Sized + Writer,
-{
-    writer.write_str("</html>")
-}
-
-pub trait Io: 'static {
-    type Error;
-    type Path: ?Sized;
-
-    fn read_file(&self, path: &Self::Path) -> Result<String, Self::Error>;
-
-    fn copy(&self, src: &Self::Path, dst: &Self::Path) -> Result<(), Self::Error>;
 }

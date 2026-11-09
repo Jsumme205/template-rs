@@ -1,6 +1,6 @@
 use crate::{
-    class_interner::{Symbol, cell::ClassInternerCell},
-    utils::{BorrowCount, MaybeArc},
+    class_interner::{Interner, Symbol},
+    utils::MaybeArc,
 };
 
 pub struct ComponentMetadata<'meta> {
@@ -18,9 +18,9 @@ impl ComponentMetadata<'_> {
 }
 
 impl<'meta> ComponentMetadata<'meta> {
-    pub const fn builder<'interner, B>(
-        interner: &'interner ClassInternerCell<B>,
-    ) -> MetadataBuilder<'meta, 'interner, B> {
+    pub const fn builder<'interner>(
+        interner: &'interner mut Interner,
+    ) -> MetadataBuilder<'meta, 'interner> {
         MetadataBuilder {
             id: None,
             class: None,
@@ -29,16 +29,13 @@ impl<'meta> ComponentMetadata<'meta> {
     }
 }
 
-pub struct MetadataBuilder<'meta, 'interner, B> {
+pub struct MetadataBuilder<'meta, 'interner> {
     id: Option<MaybeArc<'meta, str>>,
     class: Option<Symbol>,
-    interner: &'interner ClassInternerCell<B>,
+    interner: &'interner mut Interner,
 }
 
-impl<'meta, 'interner, B> MetadataBuilder<'meta, 'interner, B>
-where
-    B: BorrowCount,
-{
+impl<'meta, 'interner> MetadataBuilder<'meta, 'interner> {
     pub fn finish(&mut self) -> ComponentMetadata<'meta> {
         ComponentMetadata {
             id: self.id.take(),
@@ -52,7 +49,7 @@ where
     }
 
     pub fn class(&mut self, class: impl AsRef<str>) -> &mut Self {
-        let sym = self.interner.try_write().unwrap().intern(class.as_ref());
+        let sym = self.interner.intern(class.as_ref());
         self.class = Some(sym);
         self
     }
@@ -79,5 +76,9 @@ impl core::fmt::Display for ComponentMetadata<'_> {
 impl ComponentMetadata<'_> {
     pub fn id(&self) -> Option<&str> {
         self.id.as_deref()
+    }
+
+    pub fn class(&self) -> Option<&str> {
+        self.class.as_deref()
     }
 }

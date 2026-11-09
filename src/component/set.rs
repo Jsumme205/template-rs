@@ -1,19 +1,18 @@
-use core::{alloc::Layout, marker::PhantomData, mem, ptr::NonNull, slice};
+use core::{marker::PhantomData, mem, ptr::NonNull, slice};
 
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{
-    component::{Component, WriteContext, cell::ComponentSetCell},
+    component::{Component, OwnedComponent, WriteContext},
     error::Error,
-    utils::{BorrowCount, ConstTyId},
+    utils::{self, BorrowCount, ConstTyId},
 };
 
 #[repr(C)]
 pub(crate) struct ComponentVTable {
-    layout: Layout,
     typeid: ConstTyId,
-    render: unsafe fn(*const (), ctx: &mut WriteContext<'_, '_>) -> Result<(), Error>,
-    drop: unsafe fn(*mut (), layout: Layout),
+    render: unsafe fn(*const (), *const (), ctx: &mut WriteContext<'_, '_>) -> Result<(), Error>,
+    drop: unsafe fn(*mut (), *mut ()),
 }
 
 pub struct DynComponent<'a> {
@@ -27,12 +26,59 @@ pub struct DynComponent<'a> {
 
 struct RawComponent {
     data_ptr: NonNull<()>,
+    metadata_ptr: NonNull<()>,
     vtable: &'static ComponentVTable,
+}
+
+impl RawComponent {
+    const unsafe fn from_ref<C>(component: &C) -> Self
+    where
+        C: ?Sized + Component,
+    {
+        let vtable: &'static ComponentVTable = const {
+            &ComponentVTable {
+                typeid: ConstTyId::of::<C>(),
+                render: imp::component_render_shim::<C>,
+                drop: imp::noop_drop_shim,
+            }
+        };
+
+        let (data_ptr, metadata_ptr) = utils::deconstruct(component);
+
+        Self {
+            data_ptr,
+            metadata_ptr,
+            vtable,
+        }
+    }
+
+    fn from_owned<C>(component: Box<C>) -> Self
+    where
+        C: ?Sized + OwnedComponent,
+    {
+        let ptr = Box::into_non_null(component);
+
+        let vtable: &'static ComponentVTable = const {
+            &ComponentVTable {
+                typeid: ConstTyId::of::<C>(),
+                render: imp::component_render_shim::<C>,
+                drop: imp::drop_shim::<C>,
+            }
+        };
+
+        let (data_ptr, metadata_ptr) = utils::deconstruct(ptr);
+
+        Self {
+            data_ptr,
+            metadata_ptr,
+            vtable,
+        }
+    }
 }
 
 impl Drop for RawComponent {
     fn drop(&mut self) {
-        unsafe { (self.vtable.drop)(self.data_ptr.as_ptr(), self.vtable.layout) }
+        unsafe { (self.vtable.drop)(self.data_ptr.as_ptr(), self.metadata_ptr.as_ptr()) }
     }
 }
 
@@ -41,56 +87,39 @@ impl<'a> DynComponent<'a> {
     where
         C: Component + 'a,
     {
-        let vtable: &'static ComponentVTable = const {
-            &ComponentVTable {
-                layout: Layout::new::<C>(),
-                typeid: ConstTyId::of::<C>(),
-                render: imp::component_render_shim::<C>,
-                drop: imp::noop_drop_shim,
+        unsafe {
+            Self {
+                raw: RawComponent::from_ref(component),
+                _marker: PhantomData,
             }
-        };
-
-        Self {
-            raw: RawComponent {
-                data_ptr: NonNull::from_ref(component).cast(),
-                vtable,
-            },
-            _marker: PhantomData,
         }
     }
 
     pub fn from_owned<C>(component: C) -> Self
     where
-        C: Component + 'a,
+        C: OwnedComponent + 'a,
     {
         Self::from_boxed(component.into())
     }
 
     pub fn from_boxed<C>(component: Box<C>) -> Self
     where
-        C: Component + 'a,
+        C: OwnedComponent + 'a,
     {
-        let ptr = Box::into_non_null(component);
-        let vtable = const {
-            &ComponentVTable {
-                layout: Layout::new::<C>(),
-                typeid: ConstTyId::of::<C>(),
-                render: imp::component_render_shim::<C>,
-                drop: imp::drop_shim::<C>,
-            }
-        };
-
         Self {
-            raw: RawComponent {
-                data_ptr: ptr.cast(),
-                vtable,
-            },
+            raw: RawComponent::from_owned(component),
             _marker: PhantomData,
         }
     }
 
     pub fn render(&self, ctx: &mut WriteContext<'_, '_>) -> Result<(), Error> {
-        unsafe { (self.raw.vtable.render)(self.raw.data_ptr.as_ptr(), ctx) }
+        unsafe {
+            (self.raw.vtable.render)(
+                self.raw.data_ptr.as_ptr(),
+                self.raw.metadata_ptr.as_ptr(),
+                ctx,
+            )
+        }
     }
 
     pub fn is_same_as<C>(&self) -> bool {
@@ -120,9 +149,10 @@ where
 
 impl<'c, C> IntoDynComponent<'c, Val> for C
 where
-    C: Component + 'c,
+    C: OwnedComponent + 'c,
 {
     type Component = C;
+
     fn into_dyn_component(self) -> DynComponent<'c> {
         DynComponent::from_owned(self)
     }
@@ -134,23 +164,29 @@ mod imp {
     use crate::{
         component::{Component, WriteContext},
         error::Error,
+        utils,
     };
 
-    pub(super) unsafe fn component_render_shim<C: Component>(
+    pub(super) unsafe fn component_render_shim<C: Component + ?Sized>(
         ptr: *const (),
+        metadata_ptr: *const (),
         ctx: &mut WriteContext<'_, '_>,
     ) -> Result<(), Error> {
-        unsafe { C::render(&*(ptr as *const C), ctx) }
+        let ptr = utils::reconstruct(ptr, metadata_ptr);
+
+        unsafe { C::render(&*ptr, ctx) }
     }
 
-    pub(super) unsafe fn drop_shim<T>(ptr: *mut (), layout: Layout) {
+    pub(super) unsafe fn drop_shim<T: ?Sized>(ptr: *mut (), metadata_ptr: *mut ()) {
         unsafe {
+            let ptr = utils::reconstruct(ptr, metadata_ptr);
+            let layout = Layout::for_value_raw(ptr);
             ptr::drop_in_place(ptr as *mut T);
             alloc::alloc::dealloc(ptr as *mut u8, layout);
         }
     }
 
-    pub(super) unsafe fn noop_drop_shim(_ptr: *mut (), _layout: Layout) {}
+    pub(super) unsafe fn noop_drop_shim(_ptr: *mut (), _meta: *mut ()) {}
 }
 
 pub struct ComponentSet<'a> {
@@ -254,9 +290,9 @@ impl<'a> ComponentRange<'a> {
 }
 
 impl<'range> ComponentRange<'range> {
-    pub(crate) fn builder<'set, B: BorrowCount>(
-        component_set: &'set ComponentSetCell<'range, B>,
-    ) -> ComponentRangeBuilder<'range, 'set, B> {
+    pub(crate) fn builder<'set>(
+        component_set: &'set mut ComponentSet<'range>,
+    ) -> ComponentRangeBuilder<'range, 'set> {
         ComponentRangeBuilder {
             range: ComponentRange {
                 repr: ComponentRangeRepr::SingleRange {
@@ -269,21 +305,15 @@ impl<'range> ComponentRange<'range> {
     }
 }
 
-pub(crate) struct ComponentRangeBuilder<'range, 'set, B> {
-    component_set: &'set ComponentSetCell<'range, B>,
+pub(crate) struct ComponentRangeBuilder<'range, 'set> {
+    component_set: &'set mut ComponentSet<'range>,
     range: ComponentRange<'range>,
 }
 
-impl<'range, 'set, B> ComponentRangeBuilder<'range, 'set, B>
-where
-    B: BorrowCount,
-{
+impl<'range, 'set> ComponentRangeBuilder<'range, 'set> {
     pub(crate) fn register(&mut self, component: DynComponent<'range>) -> &mut Self {
         let component = component;
-        self.component_set
-            .try_write()
-            .expect("exclusive borrow failed")
-            .register(component, &mut self.range);
+        self.component_set.register(component, &mut self.range);
 
         self
     }

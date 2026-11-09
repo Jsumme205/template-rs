@@ -2,8 +2,9 @@ use core::any::TypeId;
 use core::borrow::Borrow;
 use core::hash::Hash;
 use core::marker::PhantomData;
-use core::mem::{self, MaybeUninit};
+use core::mem::{self, ManuallyDrop, MaybeUninit};
 use core::ops::Deref;
+use core::ptr::NonNull;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::{ptr, slice};
 
@@ -19,6 +20,15 @@ where
 
 pub type MaybeBoxed<'a, T> = MaybeBorrowed<'a, Box<T>>;
 pub type MaybeArc<'a, T> = MaybeBorrowed<'a, Arc<T>>;
+
+impl<'a> Clone for MaybeArc<'a, str> {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Borrowed(b) => Self::Borrowed(*b),
+            Self::Owned(o) => MaybeBorrowed::Owned(Arc::clone(o)),
+        }
+    }
+}
 
 impl<'a, Ptr> From<&'a Ptr::Target> for MaybeBorrowed<'a, Ptr>
 where
@@ -181,19 +191,6 @@ impl BorrowCount for AtomicUsize {
     }
 }
 
-pub trait Boxed: Sized {
-    fn boxed(self) -> Box<Self>;
-}
-
-impl<T> Boxed for T {
-    fn boxed(self) -> Box<Self> {
-        self.into()
-    }
-}
-
-pub(crate) const EXPECT_ALREADY_BORROWED_MESSAGE: &str =
-    "PANIC: already borrowed mutably. There is a bug somewhere in the code";
-
 pub struct PushBuffer<'a, T> {
     buffer: &'a mut [MaybeUninit<T>],
     len: usize,
@@ -237,5 +234,102 @@ impl<'a, T> PushBuffer<'a, T> {
 
     pub const fn into_mut_slice(self) -> &'a mut [T] {
         unsafe { slice::from_raw_parts_mut(self.buffer.as_mut_ptr().cast(), self.len) }
+    }
+}
+
+const FAT_PTR_SIZE: usize = mem::size_of::<usize>() * 2;
+const THIN_PTR_SIZE: usize = mem::size_of::<usize>();
+
+pub unsafe trait Pointer {
+    type Thin: ThinPointer;
+    type Pointee: ?Sized;
+}
+
+pub unsafe trait ThinPointer: Clone + Copy {
+    type ChangePointee<T: ?Sized>: Pointer;
+
+    const DANGLING: Self;
+}
+
+unsafe impl ThinPointer for *const () {
+    type ChangePointee<T: ?Sized> = *const T;
+    const DANGLING: Self = ptr::dangling();
+}
+
+unsafe impl ThinPointer for *mut () {
+    type ChangePointee<T: ?Sized> = *mut T;
+    const DANGLING: Self = ptr::dangling_mut();
+}
+
+unsafe impl ThinPointer for NonNull<()> {
+    type ChangePointee<T: ?Sized> = NonNull<T>;
+    const DANGLING: Self = NonNull::dangling();
+}
+
+unsafe impl<T: ?Sized> Pointer for *const T {
+    type Thin = *const ();
+
+    type Pointee = T;
+}
+
+unsafe impl<T: ?Sized> Pointer for &T {
+    type Thin = NonNull<()>;
+
+    type Pointee = T;
+}
+
+unsafe impl<T: ?Sized> Pointer for &mut T {
+    type Thin = NonNull<()>;
+
+    type Pointee = T;
+}
+
+unsafe impl<T: ?Sized> Pointer for *mut T {
+    type Thin = *mut ();
+    type Pointee = T;
+}
+
+unsafe impl<T: ?Sized> Pointer for NonNull<T> {
+    type Thin = NonNull<()>;
+    type Pointee = T;
+}
+
+pub const fn deconstruct<Ptr>(ptr: Ptr) -> (Ptr::Thin, Ptr::Thin)
+where
+    Ptr: Pointer,
+{
+    // FIXME: const-hack. the "destructor" of ptr cannot be evaluated at compile time but there logically isn't any constructor
+    // because it's always a non-owning reference
+    let ptr = ManuallyDrop::new(ptr);
+
+    match mem::size_of::<Ptr>() {
+        FAT_PTR_SIZE => {
+            let [data, metadata]: [Ptr::Thin; 2] = unsafe { mem::transmute_copy(&ptr) };
+            (data, metadata)
+        }
+        THIN_PTR_SIZE => {
+            let data: Ptr::Thin = unsafe { mem::transmute_copy(&ptr) };
+            (data, Ptr::Thin::DANGLING)
+        }
+        _ => unsafe { core::hint::unreachable_unchecked() },
+    }
+}
+
+pub const fn reconstruct<P, T>(data: P, metadata: P) -> P::ChangePointee<T>
+where
+    P: ThinPointer,
+    T: ?Sized,
+{
+    match mem::size_of::<*const T>() {
+        FAT_PTR_SIZE => {
+            let arr = [data, metadata];
+            unsafe { mem::transmute_copy(&arr) }
+        }
+        THIN_PTR_SIZE => {
+            let ptr = &raw const data;
+
+            unsafe { (ptr as *const P::ChangePointee<T>).read() }
+        }
+        _ => unsafe { core::hint::unreachable_unchecked() },
     }
 }

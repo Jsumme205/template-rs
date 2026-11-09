@@ -1,15 +1,16 @@
-use core::{fmt::Display, marker::PhantomData, mem, sync::atomic::AtomicUsize};
+use core::{fmt::Display, mem};
 
 use alloc::{sync::Arc, vec::Vec};
 
 use crate::{
     component::{
         Component, WriteContext,
-        set::{ComponentRange, ComponentRangeBuilder},
+        set::{ComponentRange, ComponentRangeBuilder, ComponentSet},
     },
     error::Error,
-    utils::MaybeArc,
-    writer::Writer,
+    renderable::Renderable,
+    utils::{BorrowCount, MaybeArc},
+    writer::WriterRef,
 };
 
 pub struct Head<'asset, C: ?Sized = dyn Display> {
@@ -20,20 +21,39 @@ pub struct Head<'asset, C: ?Sized = dyn Display> {
     // _marker: PhantomData<&'asset ()>,
 }
 
-pub struct HeadBuilder<'set, 'asset, B = AtomicUsize, C: ?Sized = dyn Display> {
+pub struct HeadBuilder<'set, 'asset, C: ?Sized = dyn Display> {
     metas: HeadMetadataBuilder<'asset>,
     contents: Option<MaybeArc<'asset, C>>,
     lang: Option<MaybeArc<'asset, str>>,
-    components: ComponentRangeBuilder<'asset, 'set, B>,
+    components: ComponentRangeBuilder<'asset, 'set>,
 }
 
 impl<'asset> Head<'asset> {
+    pub fn builder<'set, B>(
+        component_set: &'set mut ComponentSet<'asset>,
+    ) -> HeadBuilder<'set, 'asset, B>
+    where
+        B: BorrowCount,
+    {
+        HeadBuilder {
+            metas: HeadMetadata::builder(),
+            contents: None,
+            lang: None,
+            components: ComponentRange::builder(component_set),
+        }
+    }
+}
+
+impl<'asset, C> Head<'asset, C>
+where
+    C: ?Sized + Renderable,
+{
     pub fn render(
         &self,
         ctx: &mut WriteContext<'_, '_>,
         in_scope: impl FnOnce(&mut WriteContext<'_, '_>) -> Result<(), Error>,
     ) -> Result<(), Error> {
-        self.metas.write(ctx.writer)
+        self.metas.write(&mut ctx.writer)
     }
 }
 
@@ -50,7 +70,7 @@ impl<'a> HeadMetadata<'a> {
         HeadMetadataBuilder { inner: Vec::new() }
     }
 
-    fn write(&self, writer: &mut (impl Writer + ?Sized)) -> Result<(), Error> {
+    fn write(&self, writer: &mut WriterRef<'_>) -> Result<(), Error> {
         todo!()
     }
 }

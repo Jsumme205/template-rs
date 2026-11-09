@@ -10,19 +10,17 @@ use core::{
 
 use alloc::boxed::Box;
 
-pub mod cell;
-
-pub struct ClassInterner {
+pub struct Interner {
     pool: Pool,
     map: LazyCell<hashbrown::HashMap<Interned, u32>>,
     next_id: u32,
 }
 
 // SAFETY: we use typical XOR mutablility rules
-unsafe impl Send for ClassInterner {}
-unsafe impl Sync for ClassInterner {}
+unsafe impl Send for Interner {}
+unsafe impl Sync for Interner {}
 
-impl ClassInterner {
+impl Interner {
     pub(crate) const fn new() -> Self {
         Self {
             pool: Pool::new(),
@@ -45,11 +43,18 @@ impl ClassInterner {
             (interned, next_id)
         });
 
-        Symbol(next_id, NonNull::from_ref(i.as_slice()))
+        Symbol {
+            slice: NonNull::from_ref(i.as_slice()),
+            id: next_id,
+        }
     }
 }
 
-pub struct Symbol(u32, NonNull<str>);
+/// interner symbol with O(1) comparison
+pub struct Symbol {
+    slice: NonNull<str>,
+    id: u32,
+}
 
 // SAFETY: this is just a wrapper around an integer and an always valid pointer to a string, as it never gets dropped
 unsafe impl Send for Symbol {}
@@ -59,13 +64,13 @@ impl Deref for Symbol {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        unsafe { self.1.as_ref() }
+        unsafe { self.slice.as_ref() }
     }
 }
 
 impl PartialEq for Symbol {
     fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
+        self.id == other.id
     }
 }
 
@@ -73,7 +78,7 @@ impl Eq for Symbol {}
 
 impl Hash for Symbol {
     fn hash<H: core::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
+        self.id.hash(state);
     }
 }
 
